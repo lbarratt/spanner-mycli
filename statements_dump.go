@@ -11,12 +11,42 @@ import (
 	"github.com/apstndb/spanner-mycli/enums"
 )
 
+// QueryParts represents a subset of optional query parts that can be specified
+// for dump queries.
+type QueryParts struct {
+	Except string
+	Where  string
+}
+
+func (p *QueryParts) constructQuery(tableName string) string {
+	b := strings.Builder{}
+
+	b.WriteString("SELECT *")
+
+	if len(p.Except) > 0 {
+		b.WriteString(" EXCEPT (")
+		b.WriteString(p.Except)
+		b.WriteString(")")
+	}
+
+	b.WriteString(" FROM `")
+	b.WriteString(tableName)
+	b.WriteString("`")
+
+	if len(p.Where) > 0 {
+		b.WriteString(" WHERE ")
+		b.WriteString(p.Where)
+	}
+
+	return b.String()
+}
+
 // DumpDatabaseStatement represents DUMP DATABASE statement
 // It exports both DDL and data for all tables in the database
 type DumpDatabaseStatement struct{}
 
 func (s *DumpDatabaseStatement) Execute(ctx context.Context, session *Session) (*Result, error) {
-	return executeDump(ctx, session, dumpModeDatabase, nil)
+	return executeDump(ctx, session, dumpModeDatabase, nil, QueryParts{})
 }
 
 // DumpSchemaStatement represents DUMP SCHEMA statement
@@ -24,17 +54,18 @@ func (s *DumpDatabaseStatement) Execute(ctx context.Context, session *Session) (
 type DumpSchemaStatement struct{}
 
 func (s *DumpSchemaStatement) Execute(ctx context.Context, session *Session) (*Result, error) {
-	return executeDump(ctx, session, dumpModeSchema, nil)
+	return executeDump(ctx, session, dumpModeSchema, nil, QueryParts{})
 }
 
-// DumpTablesStatement represents DUMP TABLES statement
+// DumpTablesStatement represents DUMP TABLES statement with optional QueryParts.
 // It exports data only for specified tables (no DDL)
 type DumpTablesStatement struct {
 	Tables []string
+	Parts  QueryParts
 }
 
 func (s *DumpTablesStatement) Execute(ctx context.Context, session *Session) (*Result, error) {
-	return executeDump(ctx, session, dumpModeTables, s.Tables)
+	return executeDump(ctx, session, dumpModeTables, s.Tables, s.Parts)
 }
 
 // dumpMode represents the type of dump operation
@@ -51,7 +82,7 @@ func (m dumpMode) shouldExportData() bool { return m == dumpModeDatabase || m ==
 
 // executeDump is the main entry point for all dump operations.
 // It decides between streaming and buffered mode based on the output stream and settings.
-func executeDump(ctx context.Context, session *Session, mode dumpMode, specificTables []string) (*Result, error) {
+func executeDump(ctx context.Context, session *Session, mode dumpMode, specificTables []string, parts QueryParts) (*Result, error) {
 	if session.adminClient == nil {
 		return nil, fmt.Errorf("admin client is not initialized")
 	}
@@ -63,9 +94,9 @@ func executeDump(ctx context.Context, session *Session, mode dumpMode, specificT
 	outStream := session.systemVariables.StreamManager.GetWriter()
 	// Use streaming unless: output is nil/io.Discard (tests) or streaming explicitly disabled
 	if outStream != nil && outStream != io.Discard && session.systemVariables.StreamingMode != enums.StreamingModeFalse {
-		return executeDumpStreaming(ctx, session, mode, specificTables, outStream)
+		return executeDumpStreaming(ctx, session, mode, specificTables, parts, outStream)
 	}
-	return executeDumpBuffered(ctx, session, mode, specificTables)
+	return executeDumpBuffered(ctx, session, mode, specificTables, parts)
 }
 
 // getTablesForExport returns the list of tables to export based on the dump mode.
@@ -79,7 +110,7 @@ func getTablesForExport(ctx context.Context, session *Session, mode dumpMode, sp
 
 // executeDumpBuffered performs dump operation with buffering.
 // All output is collected in memory before being returned.
-func executeDumpBuffered(ctx context.Context, session *Session, mode dumpMode, specificTables []string) (*Result, error) {
+func executeDumpBuffered(ctx context.Context, session *Session, mode dumpMode, specificTables []string, parts QueryParts) (*Result, error) {
 	result := &Result{AffectedRows: 0, IsDirectOutput: true}
 	if mode.shouldExportDDL() {
 		ddlResult, err := exportDDL(ctx, session)
@@ -93,7 +124,7 @@ func executeDumpBuffered(ctx context.Context, session *Session, mode dumpMode, s
 		return nil, err
 	}
 	for _, table := range tables {
-		dataResult, err := exportTableDataBuffered(ctx, session, table)
+		dataResult, err := exportTableDataBuffered(ctx, session, table, parts)
 		if err != nil {
 			return nil, fmt.Errorf("export table %s: %w", table, err)
 		}
@@ -118,7 +149,7 @@ func writeResultRows(out io.Writer, rows []Row) error {
 // executeDumpStreaming performs dump operation with streaming output.
 // Data is written directly to the output stream as it's processed,
 // avoiding memory buildup for large tables.
-func executeDumpStreaming(ctx context.Context, session *Session, mode dumpMode, specificTables []string, out io.Writer) (*Result, error) {
+func executeDumpStreaming(ctx context.Context, session *Session, mode dumpMode, specificTables []string, parts QueryParts, out io.Writer) (*Result, error) {
 	var totalAffectedRows int
 
 	// Export DDL if requested
@@ -141,8 +172,10 @@ func executeDumpStreaming(ctx context.Context, session *Session, mode dumpMode, 
 		// Write table comment
 		fmt.Fprintf(out, "-- Data for table %s\n", table)
 
+		sql := parts.constructQuery(table)
+
 		// Execute SELECT * with streaming enabled - SQL formatter streams INSERT statements directly to output
-		dataResult, err := executeSQLWithFormat(ctx, session, fmt.Sprintf("SELECT * FROM `%s`", table),
+		dataResult, err := executeSQLWithFormat(ctx, session, sql,
 			enums.DisplayModeSQLInsert, enums.StreamingModeTrue, table)
 		if err != nil {
 			return nil, fmt.Errorf("failed to export table %s: %w", table, err)
@@ -198,8 +231,10 @@ func getTableDependencyOrder(ctx context.Context, session *Session, specificTabl
 }
 
 // exportTableDataBuffered exports data from a single table with buffering
-func exportTableDataBuffered(ctx context.Context, session *Session, tableName string) (*Result, error) {
-	dataResult, err := executeSQLWithFormat(ctx, session, fmt.Sprintf("SELECT * FROM `%s`", tableName),
+func exportTableDataBuffered(ctx context.Context, session *Session, tableName string, parts QueryParts) (*Result, error) {
+	sql := parts.constructQuery(tableName)
+
+	dataResult, err := executeSQLWithFormat(ctx, session, sql,
 		enums.DisplayModeSQLInsert, enums.StreamingModeFalse, tableName)
 	if err != nil {
 		return nil, err

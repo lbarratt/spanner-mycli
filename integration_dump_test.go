@@ -514,3 +514,83 @@ func TestDumpWithMixedDependencies(t *testing.T) {
 		t.Errorf("Products should appear before OrderItems (FK dependency)")
 	}
 }
+
+func TestDumpWithExceptWhere(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	ctx := context.Background()
+
+	_, session, teardown := initializeWithRandomDB(t, nil, nil)
+	defer teardown()
+
+	// Create tables with both INTERLEAVE and FK relationships
+	setupDDL := []string{
+		`CREATE TABLE Categories (
+			CategoryId INT64 NOT NULL,
+			CategoryName STRING(100),
+		) PRIMARY KEY (CategoryId)`,
+	}
+
+	for _, ddl := range setupDDL {
+		stmt, err := BuildStatement(ddl)
+		if err != nil {
+			t.Fatalf("Failed to build DDL statement: %v", err)
+		}
+		if _, err := stmt.Execute(ctx, session); err != nil {
+			t.Fatalf("Failed to create test table: %v", err)
+		}
+	}
+
+	// Insert test data
+	insertStmts := []string{
+		`INSERT INTO Categories (CategoryId, CategoryName) VALUES (1, 'Electronics')`,
+		`INSERT INTO Categories (CategoryId, CategoryName) VALUES (2, 'Clothing')`,
+	}
+
+	for _, sql := range insertStmts {
+		stmt, err := BuildStatement(sql)
+		if err != nil {
+			t.Fatalf("Failed to build DML statement: %v", err)
+		}
+		if _, err := stmt.Execute(ctx, session); err != nil {
+			t.Fatalf("Failed to insert test data: %v", err)
+		}
+	}
+
+	// Test DUMP TABLE with EXCEPT and WHERE
+	dumpStmt := &DumpTablesStatement{
+		Tables: []string{"Categories"},
+		Parts: QueryParts{
+			Except: "CategoryName",
+			Where:  "CategoryId = 2",
+		},
+	}
+	result, err := dumpStmt.Execute(ctx, session)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	// Convert rows to string for analysis
+	var output strings.Builder
+	for _, row := range result.Rows {
+		if len(row) > 0 {
+			output.WriteString(row[0])
+			output.WriteString("\n")
+		}
+	}
+	outputStr := output.String()
+
+	fmt.Println(outputStr)
+
+	// Assert that we don't include rows filtered by WHERE
+	if strings.Count(outputStr, "INSERT INTO Categories (CategoryId) VALUES (1)") != 0 {
+		t.Errorf("Expected 0 INSERT statements for Categories with CategoryId != 2")
+	}
+
+	// Assert that we don't dump columns specified by EXCEPT
+	if strings.Count(outputStr, "INSERT INTO Categories (CategoryId) VALUES (2)") != 1 {
+		t.Errorf("Expected 1 INSERT statement for Categories without CategoryName")
+	}
+}

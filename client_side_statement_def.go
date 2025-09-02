@@ -214,14 +214,15 @@ var clientSideStatementDefs = []*clientSideStatementDef{
 	{
 		Descriptions: []clientSideStatementDescription{
 			{
-				Usage:  `Export specific tables as SQL INSERT statements`,
-				Syntax: `DUMP TABLES <table1> [, <table2>, ...]`,
+				Usage:  `Export specific tables as SQL INSERT statements filtering rows with optional EXCEPT and WHERE clauses`,
+				Syntax: `DUMP TABLES <table1> [, <table2>, ...] [EXCEPT <excepting>] [WHERE <predicate>]`,
 			},
 		},
-		Pattern: regexp.MustCompile(`(?is)^DUMP\s+TABLES\s+(.+)$`),
+		Pattern: regexp.MustCompile(`(?is)^\s*DUMP\s+TABLES?\s+([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*)\s*(?:EXCEPT\s+([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*))?\s*(?:WHERE\s+(.+))?\s*$`),
 		HandleSubmatch: func(matched []string) (Statement, error) {
 			tables := splitTableNames(matched[1])
-			return &DumpTablesStatement{Tables: tables}, nil
+			parts := QueryParts{Except: matched[2], Where: matched[3]}
+			return &DumpTablesStatement{Tables: tables, Parts: parts}, nil
 		},
 	},
 	// Operations
