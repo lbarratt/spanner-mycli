@@ -218,12 +218,10 @@ var clientSideStatementDefs = []*clientSideStatementDef{
 				Syntax: `DUMP TABLES <table1> [, <table2>, ...] [EXCEPT <excepting>] [WHERE <predicate>]`,
 			},
 		},
-		Pattern: regexp.MustCompile(`(?is)^\s*DUMP\s+TABLES?\s+([A-Za-z_][A-Za-z0-9_]*)\s*(EXCEPT\s+([A-Za-z_][A-Za-z0-9_]*))?\s*(WHERE\s+(.+))?\s*$`),
+		Pattern: regexp.MustCompile(`(?is)^\s*DUMP\s+TABLES?\s+([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*)\s*(?:EXCEPT\s+([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*))?\s*(?:WHERE\s+(.+))?\s*$`),
 		HandleSubmatch: func(matched []string) (Statement, error) {
 			tables := splitTableNames(matched[1])
-			except := matched[3]
-			where := matched[5]
-			parts := QueryParts{Except: except, Where: where}
+			parts := QueryParts{Except: matched[2], Where: matched[3]}
 			return &DumpTablesStatement{Tables: tables, Parts: parts}, nil
 		},
 	},
